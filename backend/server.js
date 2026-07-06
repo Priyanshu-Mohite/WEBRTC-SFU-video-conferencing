@@ -168,15 +168,21 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Trap A Backend Handler: Security Handshake
+  // Trap A Backend Handler: Security Handshake (Updated for Both Transports)
   socket.on(
     "transport-connect",
-    async ({ roomId, dtlsParameters }, callback) => {
-      console.log(`--- Handshake Request (DTLS) from Peer: ${socket.id} ---`);
+    async ({ roomId, dtlsParameters, isSend }, callback) => {
+      console.log(
+        `--- Handshake Request (DTLS) from Peer: ${socket.id} | isSend: ${isSend} ---`,
+      );
       try {
         const peer = rooms.get(roomId).peers.get(socket.id);
-        // Yahan hum simply pehli transport utha rahe hain (Send Transport)
-        const transport = Array.from(peer.transports.values())[0];
+
+        // CRITICAL: Yahan decide ho raha hai ki kis pipe pe lock lagana hai
+        const transport = isSend ? peer.sendTransport : peer.recvTransport;
+
+        if (!transport)
+          throw new Error(`${isSend ? "Send" : "Recv"} Transport not found!`);
 
         // C++ Worker me transport ko securely lock karna
         await transport.connect({ dtlsParameters });
@@ -198,7 +204,11 @@ io.on("connection", (socket) => {
       );
       try {
         const peer = rooms.get(roomId).peers.get(socket.id);
-        const transport = Array.from(peer.transports.values())[0];
+        // const transport = Array.from(peer.transports.values())[0];
+        const transport = peer.sendTransport;
+
+        if (!transport)
+          throw new Error("Send Transport not found for producing!");
 
         // C++ Worker me Server-Side Producer object create karna
         const producer = await transport.produce({
@@ -260,6 +270,108 @@ io.on("connection", (socket) => {
       console.error("Error creating Recv Transport:", error);
       callback({ error: error.message });
     }
+  });
+
+  // Phase 2: Frontend se Video Consume karne ki request
+  socket.on(
+    "consume",
+    async ({ roomId, producerId, rtpCapabilities }, callback) => {
+      console.log(`--- Consume Request for Producer: ${producerId} ---`);
+      try {
+        const room = rooms.get(roomId);
+        if (!room) return callback({ error: "Room not found!" });
+
+        const router = room.router;
+        const peer = room.peers.get(socket.id);
+        const recvTransport = peer.recvTransport;
+
+        if (!recvTransport) {
+          return callback({
+            error: "Receive Transport abhi tak nahi bani hai!",
+          });
+        }
+
+        // 1. TERA WALA LOGIC: Compatibility Check
+        if (router.canConsume({ producerId, rtpCapabilities })) {
+          // 2. CRITICAL STEP: Paused state me Server-Side Consumer banana
+          const consumer = await recvTransport.consume({
+            producerId,
+            rtpCapabilities,
+            paused: true, // Backend tab tak ruka rahega jab tak frontend DTLS handshake na kar le
+          });
+
+          // 3. Is consumer ko memory (peer object) me save kar lo
+          peer.consumers.set(consumer.id, consumer);
+
+          console.log(`Server-side Consumer Created ID: ${consumer.id}`);
+
+          // Cleanup Traps: Agar video bhejne wale ne tab band kar diya toh ye consumer bhi delete ho jaye
+          consumer.on("transportclose", () => {
+            peer.consumers.delete(consumer.id);
+          });
+          consumer.on("producerclose", () => {
+            peer.consumers.delete(consumer.id);
+            // Tu chahe toh frontend ko emit karke bol sakta hai ki "Video ruk gayi hai, UI clear kar de"
+          });
+
+          // 4. Frontend ko parameters wapas bhejo taaki wahan 'clientConsumer' ban sake
+          callback({
+            params: {
+              id: consumer.id,
+              producerId: consumer.producerId,
+              kind: consumer.kind,
+              rtpParameters: consumer.rtpParameters,
+            },
+          });
+        } else {
+          callback({
+            error:
+              "Client ka browser is video format ko support nahi karta (canConsume false)",
+          });
+        }
+      } catch (error) {
+        console.error("Consume error:", error);
+        callback({ error: error.message });
+      }
+    },
+  );
+
+  // Phase 4 (Server Side): Consumer ko Un-pause karna
+  socket.on("consumer-resume", async ({ roomId, consumerId }) => {
+    try {
+      const peer = rooms.get(roomId).peers.get(socket.id);
+      const consumer = peer.consumers.get(consumerId);
+
+      if (!consumer) return;
+
+      // C++ Worker ko green signal do ki video frames bhejna chalu kare
+      await consumer.resume();
+      console.log(
+        `Consumer ID: ${consumerId} UN-PAUSED! Video is flowing to client.`,
+      );
+    } catch (error) {
+      console.error("Error resuming consumer:", error);
+    }
+  });
+
+  // Backend se pucho ki room me kon kon video bhej raha hai
+  socket.on("get-producers", ({ roomId }, callback) => {
+    const room = rooms.get(roomId);
+    if (!room) return callback([]);
+
+    let producerIds = [];
+
+    // Room ke saare users me check karo
+    room.peers.forEach((peer) => {
+      // Khud ki video chhod kar baaki sabki ID le lo
+      if (peer.id !== socket.id) {
+        peer.producers.forEach((producer) => {
+          producerIds.push(producer.id);
+        });
+      }
+    });
+
+    callback(producerIds);
   });
 });
 

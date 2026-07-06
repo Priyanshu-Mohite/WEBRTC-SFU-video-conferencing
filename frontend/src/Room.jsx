@@ -6,7 +6,10 @@ const Room = () => {
   const [device, setDevice] = useState(null);
   // Transport ko state me save karenge taaki baad me video bhej sakein
   const [sendTransport, setSendTransport] = useState(null);
+  const [recvTransport, setRecvTransport] = useState(null);
   const socketRef = useRef(null);
+  const localVideoRef = useRef(null);
+  const remoteVideoRef = useRef(null);
 
   useEffect(() => {
     socketRef.current = io("http://localhost:3000");
@@ -75,17 +78,15 @@ const Room = () => {
         //   },
         // );
 
+        // Tere existing createWebRtcTransport me ye update kar
         transport.on(
           "connect",
           async ({ dtlsParameters }, callback, errback) => {
-            console.log("--- @connect fired! Sending DTLS to Backend ---");
             try {
-              // Backend ka 'transport-connect' fire karo aur wait karo
               socketRef.current.emit(
                 "transport-connect",
-                { roomId, dtlsParameters },
+                { roomId, dtlsParameters, isSend: true }, // <-- YE FLAG ADD KAR
                 () => {
-                  // Success aate hi local transport ko bata do ki connection done
                   callback();
                 },
               );
@@ -135,7 +136,130 @@ const Room = () => {
     );
   };
 
+  // PHASE 1 (Consumer): Receive Transport (Empty Pipe) Banana aur Trap lagana
+  const createRecvTransport = () => {
+    const roomId = "test-room-1";
+
+    // 1. Backend ko bol Recv pipe banane ke liye
+    socketRef.current.emit(
+      "createRecvTransport",
+      { roomId },
+      async (response) => {
+        if (response.error) return console.error(response.error);
+
+        const { params } = response;
+        console.log("Backend se Recv parameters aaye:", params);
+
+        // 2. Frontend pe apni taraf ki Recv pipe bana (Phase 1)
+        const transport = device.createRecvTransport(params);
+
+        // 3. Security Handshake Trap set karna
+        transport.on(
+          "connect",
+          async ({ dtlsParameters }, callback, errback) => {
+            console.log(
+              "--- @connect fired on RECV Transport! Sending DTLS ---",
+            );
+            try {
+              socketRef.current.emit(
+                "transport-connect",
+                { roomId, dtlsParameters, isSend: false }, // <-- isSend: false (Consumer)
+                () => {
+                  callback(); // Rasta saaf hai!
+                },
+              );
+            } catch (error) {
+              errback(error);
+            }
+          },
+        );
+
+        // (Yahan @produce event NAHI hota kyunki client recv transport se kuch bhejta nahi hai)
+
+        setRecvTransport(transport);
+        console.log(
+          "Phase 1 Done: Frontend Recv Transport ready aur Listener lag gaya!",
+        );
+      },
+    );
+  };
+
   // PHASE 5: THE TRIGGER (Yeh naya function add kar)
+  // const startWebcam = async () => {
+  //   try {
+  //     console.log("Webcam access maang raha hu...");
+  //     const stream = await navigator.mediaDevices.getUserMedia({
+  //       video: true,
+  //       audio: false,
+  //     });
+
+  //     // Stream me se raw video track nikal
+  //     const videoTrack = stream.getVideoTracks()[0];
+
+  //     // THE TRIGGER: Transport me track daal do
+  //     // Jaise hi ye line chalegi, @connect aur @produce lagatar fire honge!
+  //     const producer = await sendTransport.produce({ track: videoTrack });
+  //     console.log(
+  //       "BINGOO! Local Producer Created & Video is flowing! ID:",
+  //       producer.id,
+  //     );
+
+  //     // --- NAYA DEBUG CODE ---
+  //     // Har 2 second mein check karega ki kitna data server pe bheja gaya
+  //     setInterval(async () => {
+  //       const stats = await producer.getStats();
+  //       stats.forEach((stat) => {
+  //         if (stat.type === "outbound-rtp" && stat.kind === "video") {
+  //           console.log(`Video Bytes Sent to Backend: ${stat.bytesSent}`);
+  //         }
+  //       });
+  //     }, 2000);
+
+  //     // Video ko screen pe dikhane ke liye (optional DOM attach)
+  //     document.getElementById("localVideo").srcObject = stream;
+  //   } catch (error) {
+  //     console.error("Camera access failed or produce failed:", error);
+  //   }
+  // };
+
+  // PHASE 5: THE TRIGGER
+  // const startWebcam = async () => {
+  //   try {
+  //     console.log("Webcam access maang raha hu...");
+  //     const stream = await navigator.mediaDevices.getUserMedia({
+  //       video: true,
+  //       audio: false,
+  //     });
+
+  //     // 1. Stream me se raw video track nikal
+  //     const videoTrack = stream.getVideoTracks()[0];
+
+  //     // 2. FIX: Video ko turant screen pe dikha de (backend ka wait mat kar)
+  //     document.getElementById("localVideo").srcObject = stream;
+
+  //     // 3. THE TRIGGER: Ab aaram se backend transport me track daal do
+  //     const producer = await sendTransport.produce({ track: videoTrack });
+  //     console.log(
+  //       "BINGOO! Local Producer Created & Video is flowing! ID:",
+  //       producer.id,
+  //     );
+
+  //     // --- NAYA DEBUG CODE ---
+  //     setInterval(async () => {
+  //       const stats = await producer.getStats();
+  //       stats.forEach((stat) => {
+  //         if (stat.type === "outbound-rtp" && stat.kind === "video") {
+  //           console.log(`Video Bytes Sent to Backend: ${stat.bytesSent}`);
+  //         }
+  //       });
+  //     }, 2000);
+
+  //   } catch (error) {
+  //     console.error("Camera access failed or produce failed:", error);
+  //   }
+  // };
+
+  // PHASE 5: THE TRIGGER
   const startWebcam = async () => {
     try {
       console.log("Webcam access maang raha hu...");
@@ -144,19 +268,22 @@ const Room = () => {
         audio: false,
       });
 
-      // Stream me se raw video track nikal
+      // 1. Stream me se raw video track nikal
       const videoTrack = stream.getVideoTracks()[0];
 
-      // THE TRIGGER: Transport me track daal do
-      // Jaise hi ye line chalegi, @connect aur @produce lagatar fire honge!
+      // 2. THE PROPER REACT FIX: useRef ke through stream attach karna
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+      }
+
+      // 3. Backend me raw track bhejna
       const producer = await sendTransport.produce({ track: videoTrack });
       console.log(
         "BINGOO! Local Producer Created & Video is flowing! ID:",
         producer.id,
       );
 
-      // --- NAYA DEBUG CODE ---
-      // Har 2 second mein check karega ki kitna data server pe bheja gaya
+      // --- DEBUG CODE ---
       setInterval(async () => {
         const stats = await producer.getStats();
         stats.forEach((stat) => {
@@ -165,12 +292,66 @@ const Room = () => {
           }
         });
       }, 2000);
-
-      // Video ko screen pe dikhane ke liye (optional DOM attach)
-      document.getElementById("localVideo").srcObject = stream;
     } catch (error) {
       console.error("Camera access failed or produce failed:", error);
     }
+  };
+
+  // PHASE 3 & 4 (Consumer): Media Receive karke Screen pe chalana
+  const consumeMedia = () => {
+    const roomId = "test-room-1";
+
+    // 1. Backend se pucho ki kiski video available hai
+    socketRef.current.emit("get-producers", { roomId }, (producerIds) => {
+      if (producerIds.length === 0) {
+        return console.log("Room me koi active video nahi hai bhai!");
+      }
+
+      // Testing ke liye pehli available video utha rahe hain
+      const producerId = producerIds[0];
+      console.log(`Mujhe iski video dekhni hai: ${producerId}`);
+
+      // 2. Backend ke canConsume check (Phase 2) ke liye request bhejo
+      socketRef.current.emit(
+        "consume",
+        {
+          roomId,
+          producerId: producerId,
+          rtpCapabilities: device.rtpCapabilities,
+        },
+        async (response) => {
+          if (response.error) return console.error(response.error);
+
+          const { params } = response;
+
+          // 3. PHASE 3: Frontend Consumer Banana (Ye chalte hi DTLS handshake fire hoga!)
+          const consumer = await recvTransport.consume({
+            id: params.id,
+            producerId: params.producerId,
+            kind: params.kind,
+            rtpParameters: params.rtpParameters,
+          });
+
+          // 4. THE TRACK IS HERE: Backend ki ruki hui (paused) video ka track mil gaya
+          const { track } = consumer;
+          console.log("Client Consumer ready! Track mil gaya:", track.id);
+
+          // 5. DOM Render: useRef ke through naye video tag me track attach karna
+          const stream = new MediaStream([track]);
+          if (remoteVideoRef.current) {
+            remoteVideoRef.current.srcObject = stream;
+          }
+
+          // 6. PHASE 4 (The Resume Signal): Backend ke C++ Worker ko Un-pause karo
+          socketRef.current.emit("consumer-resume", {
+            roomId,
+            consumerId: consumer.id,
+          });
+
+          console.log("Bingo! Play button dab gaya, video flow chalu!");
+        },
+      );
+    });
   };
 
   return (
@@ -204,13 +385,58 @@ const Room = () => {
           </button>
           <br />
           <br />
+
+          {device && !recvTransport && (
+            <button
+              onClick={createRecvTransport}
+              style={{
+                padding: "10px",
+                margin: "10px",
+                cursor: "pointer",
+                background: "blue",
+                color: "white",
+              }}
+            >
+              Create Recv Transport (Consumer Pipe)
+            </button>
+          )}
+
+          <br />
+          <br />
           <video
-            id="localVideo"
+            ref={localVideoRef} // Yeh change kiya
             autoPlay
             muted
             playsInline
             style={{ width: "300px", border: "2px solid black" }}
           ></video>
+
+          {/* Naya Button aur Video Tag */}
+          {recvTransport && (
+            <>
+              <button
+                onClick={consumeMedia}
+                style={{
+                  padding: "10px",
+                  margin: "10px",
+                  cursor: "pointer",
+                  background: "purple",
+                  color: "white",
+                }}
+              >
+                Consume Media (Get Remote Video)
+              </button>
+
+              <br />
+              <h4>Remote User Video:</h4>
+              <video
+                ref={remoteVideoRef}
+                autoPlay
+                playsInline
+                style={{ width: "300px", border: "2px solid red" }}
+              ></video>
+            </>
+          )}
         </>
       )}
     </div>
