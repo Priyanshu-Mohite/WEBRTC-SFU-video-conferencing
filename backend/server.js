@@ -219,6 +219,11 @@ io.on("connection", (socket) => {
         // Is naye producer ko peer ke object me save kar lo
         peer.producers.set(producer.id, producer);
 
+        // Jisne video chalu ki hai usko chhod kar, room ke baaki sabhi logo ko ping karo
+        socket.to(roomId).emit("new-producer", {
+          producerId: producer.id,
+        });
+
         // Server-Side Producer banne ke baad uski ID frontend ko return karna zaroori hai
         callback({ id: producer.id });
       } catch (error) {
@@ -227,11 +232,11 @@ io.on("connection", (socket) => {
     },
   );
 
-  // Handle Disconnect (Memory leaks se bachne ke liye clean-up trap)
-  socket.on("disconnect", () => {
-    console.log(`Socket disconnected: ${socket.id}`);
-    // Jab user leave karega, toh yahan se hum usko memory se saaf karne ka logic likhenge
-  });
+  // // Handle Disconnect (Memory leaks se bachne ke liye clean-up trap)
+  // socket.on("disconnect", () => {
+  //   console.log(`Socket disconnected: ${socket.id}`);
+  //   // Jab user leave karega, toh yahan se hum usko memory se saaf karne ka logic likhenge
+  // });
 
   // Phase 1: Frontend se Receive Transport banane ki request
   socket.on("createRecvTransport", async ({ roomId }, callback) => {
@@ -372,6 +377,38 @@ io.on("connection", (socket) => {
     });
 
     callback(producerIds);
+  });
+
+  // Handle Disconnect (Clean-up trap)
+  socket.on("disconnect", () => {
+    console.log(`Socket disconnected: ${socket.id}`);
+
+    // Har room me check karo ki ye user kahan tha
+    rooms.forEach((room, roomId) => {
+      const peer = room.peers.get(socket.id);
+
+      if (peer) {
+        // 1. Saare Producers (Bheji hui videos) ko destroy karo
+        peer.producers.forEach((producer) => {
+          producer.close();
+        });
+
+        // 2. Saare Consumers (Dekhi hui videos) ko destroy karo
+        peer.consumers.forEach((consumer) => {
+          consumer.close();
+        });
+
+        // 3. Transports (Pipes) ko destroy karo
+        if (peer.sendTransport) peer.sendTransport.close();
+        if (peer.recvTransport) peer.recvTransport.close();
+
+        // 4. User ko room se nikal do
+        room.peers.delete(socket.id);
+        console.log(
+          `Peer ${socket.id} ki memory saaf kar di gayi! Room: ${roomId}`,
+        );
+      }
+    });
   });
 });
 
