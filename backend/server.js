@@ -314,9 +314,13 @@ io.on("connection", (socket) => {
           consumer.on("transportclose", () => {
             peer.consumers.delete(consumer.id);
           });
+          
           consumer.on("producerclose", () => {
             peer.consumers.delete(consumer.id);
-            // Tu chahe toh frontend ko emit karke bol sakta hai ki "Video ruk gayi hai, UI clear kar de"
+            console.log(`Video ruki! Frontend ko bol raha hu dabba hatane...`);
+            // --- YE NAYI LINE DAAL ---
+            // Frontend ko emit karke batao ki ye wali video band ho gayi hai
+            socket.emit("producer-closed", { consumerId: consumer.id });
           });
 
           // 4. Frontend ko parameters wapas bhejo taaki wahan 'clientConsumer' ban sake

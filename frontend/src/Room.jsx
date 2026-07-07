@@ -2,14 +2,38 @@ import { useEffect, useRef, useState } from "react";
 import { io } from "socket.io-client";
 import { Device } from "mediasoup-client";
 
+const RemoteVideo = ({ stream }) => {
+  const videoRef = useRef(null);
+
+  useEffect(() => {
+    if (videoRef.current && stream) {
+      videoRef.current.srcObject = stream;
+    }
+  }, [stream]);
+
+  return (
+    <video
+      ref={videoRef}
+      autoPlay
+      playsInline
+      style={{
+        width: "300px",
+        border: "2px solid red",
+        margin: "10px",
+        borderRadius: "8px",
+      }}
+    />
+  );
+};
+
 const Room = () => {
   const [device, setDevice] = useState(null);
-  // Transport ko state me save karenge taaki baad me video bhej sakein
   const [sendTransport, setSendTransport] = useState(null);
   const [recvTransport, setRecvTransport] = useState(null);
   const socketRef = useRef(null);
   const localVideoRef = useRef(null);
-  const remoteVideoRef = useRef(null);
+  const isWebcamStarting = useRef(false); // NAYA INSTANT LOCK// <-- YE NAYI LINE DAAL
+  const [remoteStreams, setRemoteStreams] = useState([]); // [{ consumerId, stream }]
 
   useEffect(() => {
     socketRef.current = io("http://localhost:3000");
@@ -26,21 +50,42 @@ const Room = () => {
 
   // AUTOMATION RADAR: Backend se aane wale naye videos ko sunna
   useEffect(() => {
-    // Agar socket ya Recv pipe ready nahi hai, toh kuch mat kar
-    if (!socketRef.current || !recvTransport) return;
+    if (!socketRef.current || !recvTransport || !device) return;
 
+    // 1. Naya video aane ka listener
     const handleNewProducer = ({ producerId }) => {
       console.log("🚨 Room me naya video detect hua! ID:", producerId);
-      // Nayi ID milte hi turant consumeMedia function ko background me chala do
-      consumeMedia(producerId);
+      consumeMedia(producerId, recvTransport, device);
+    };
+
+    // 2. Video band hone ka naya listener (YE NAYA HAI)
+    const handleProducerClosed = ({ consumerId }) => {
+      // State se us band ho chuki stream ko nikal do
+      setRemoteStreams((prev) => prev.filter((s) => s.id !== consumerId));
     };
 
     socketRef.current.on("new-producer", handleNewProducer);
+    socketRef.current.on("producer-closed", handleProducerClosed); 
 
     return () => {
       socketRef.current.off("new-producer", handleNewProducer);
+      socketRef.current.off("producer-closed", handleProducerClosed); 
     };
-  }, [recvTransport]); // Yeh effect tabhi active hoga jab Recv pipe ban jayegi
+  }, [recvTransport, device]);
+
+  // AUTOMATED PIPE CREATOR: Button click ka wait mat karo
+  useEffect(() => {
+    // Agar device load ho gaya hai, aur pipes abhi tak nahi bani hain
+    if (device && !recvTransport && !sendTransport) {
+      console.log("Device ready hai! Apne aap dono pipes bana raha hu...");
+
+      // 1. Send Transport banao (video bhejne ke liye)
+      createWebRtcTransport();
+
+      // 2. Recv Transport banao (video lene ke liye)
+      createRecvTransport();
+    }
+  }, [device]); // Jaise hi 'device' state set hogi, ye khud chal padega
 
   const joinRoomAndLoadDevice = () => {
     const roomId = "test-room-1";
@@ -292,6 +337,12 @@ const Room = () => {
   // PHASE 5: THE TRIGGER
   const startWebcam = async () => {
     try {
+      if (isWebcamActive || isWebcamStarting.current) {
+        return;
+      }
+
+      // Function me ghuste hi darwaza andar se turant lock kar do!
+      isWebcamStarting.current = true;
       console.log("Webcam access maang raha hu...");
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
@@ -313,15 +364,7 @@ const Room = () => {
         producer.id,
       );
 
-      // --- DEBUG CODE ---
-      // setInterval(async () => {
-      //   const stats = await producer.getStats();
-      //   stats.forEach((stat) => {
-      //     if (stat.type === "outbound-rtp" && stat.kind === "video") {
-      //       console.log(`Video Bytes Sent to Backend: ${stat.bytesSent}`);
-      //     }
-      //   });
-      // }, 2000);
+      setIsWebcamActive(true);
     } catch (error) {
       console.error("Camera access failed or produce failed:", error);
     }
@@ -431,48 +474,81 @@ const Room = () => {
   // };
 
   // Parameter me transport aur currentDevice accept kar
-const consumeMedia = (producerId, transport, currentDevice) => {
-  const roomId = "test-room-1";
-  console.log(`Automated Consume Triggered for ID: ${producerId}`);
+  const consumeMedia = (producerId, transport, currentDevice) => {
+    const roomId = "test-room-1";
+    console.log(`Automated Consume Triggered for ID: ${producerId}`);
 
-  // Ab yahan outer state device ki jagah passed currentDevice use hoga
-  socketRef.current.emit(
-    "consume",
-    {
-      roomId,
-      producerId: producerId,
-      rtpCapabilities: currentDevice.rtpCapabilities, 
-    },
-    async (response) => {
-      if (response.error) return console.error(response.error);
-
-      const { params } = response;
-
-      // Outer state ki jagah passed transport parameter use hoga
-      const consumer = await transport.consume({
-        id: params.id,
-        producerId: params.producerId,
-        kind: params.kind,
-        rtpParameters: params.rtpParameters,
-      });
-
-      const { track } = consumer;
-      console.log("Client Consumer ready! Track mil gaya:", track.id);
-
-      const stream = new MediaStream([track]);
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = stream;
-      }
-
-      socketRef.current.emit("consumer-resume", {
+    // Ab yahan outer state device ki jagah passed currentDevice use hoga
+    socketRef.current.emit(
+      "consume",
+      {
         roomId,
-        consumerId: consumer.id,
-      });
+        producerId: producerId,
+        rtpCapabilities: currentDevice.rtpCapabilities,
+      },
+      async (response) => {
+        if (response.error) return console.error(response.error);
 
-      console.log("Bingo! Play button dab gaya, video flow chalu!");
-    },
-  );
-};
+        const { params } = response;
+
+        // Outer state ki jagah passed transport parameter use hoga
+        const consumer = await transport.consume({
+          id: params.id,
+          producerId: params.producerId,
+          kind: params.kind,
+          rtpParameters: params.rtpParameters,
+        });
+
+        const { track } = consumer;
+        console.log("Client Consumer ready! Track mil gaya:", track.id);
+
+        const stream = new MediaStream([track]);
+        // if (remoteVideoRef.current) {
+        //   remoteVideoRef.current.srcObject = stream;
+        // }
+
+        // Yahan hum nayi stream ko purani list me add kar rahe hain
+        setRemoteStreams((prev) => {
+          // Edge case: Agar ye video already list me hai toh ignore maro (duplicate rokne ke liye)
+          if (prev.find((s) => s.id === consumer.id)) return prev;
+
+          // Naya object return karo jisme purani streams + nayi stream ho
+          return [...prev, { id: consumer.id, stream }];
+        });
+
+        socketRef.current.emit("consumer-resume", {
+          roomId,
+          consumerId: consumer.id,
+        });
+
+        // 1. Agar samne wale ne camera band kiya ya leave kiya (Producer close hua)
+        consumer.on("producerclose", () => {
+          console.log(
+            "🔴 Samne wale ka producer band ho gaya. Consumer close kar raha hu.",
+          );
+          consumer.close();
+          // State se uski stream hatao taaki UI se dabba gayab ho jaye
+          setRemoteStreams((prev) => prev.filter((s) => s.id !== consumer.id));
+        });
+
+        // 2. Agar uska pura network pipe hi toot gaya (Transport close hua)
+        consumer.on("transportclose", () => {
+          console.log("🔴 Transport close ho gaya. UI clear kar raha hu.");
+          consumer.close();
+          setRemoteStreams((prev) => prev.filter((s) => s.id !== consumer.id));
+        });
+
+        // --- NAYA CLEANUP CODE END ---
+
+        socketRef.current.emit("consumer-resume", {
+          roomId,
+          consumerId: consumer.id,
+        });
+
+        console.log("Bingo! Play button dab gaya, video flow chalu!");
+      },
+    );
+  };
 
   return (
     <div style={{ padding: "20px", fontFamily: "sans-serif" }}>
@@ -494,14 +570,19 @@ const consumeMedia = (producerId, transport, currentDevice) => {
           <p>Send Transport Status: Ready ✅</p>
           <button
             onClick={startWebcam}
+            disabled={isWebcamActive} // Lock activate
             style={{
               padding: "10px",
-              cursor: "pointer",
-              background: "green",
+              cursor: isWebcamActive ? "not-allowed" : "pointer",
+              background: isWebcamActive ? "gray" : "green", // On hone par gray ho jayega
               color: "white",
+              border: "none",
+              borderRadius: "5px",
             }}
           >
-            Start Webcam (Fire The Trigger!)
+            {isWebcamActive
+              ? "Webcam Running 🎥"
+              : "Start Webcam (Fire The Trigger!)"}
           </button>
           <br />
           <br />
@@ -565,7 +646,7 @@ const consumeMedia = (producerId, transport, currentDevice) => {
       )} */}
 
       {/* Naya Video Tag (Bina button ke) */}
-      {recvTransport && (
+      {/* {recvTransport && (
         <>
           <br />
           <h4>Remote User Video:</h4>
@@ -575,6 +656,20 @@ const consumeMedia = (producerId, transport, currentDevice) => {
             playsInline
             style={{ width: "300px", border: "2px solid red" }}
           ></video>
+        </>
+      )} */}
+
+      {recvTransport && (
+        <>
+          <br />
+          <h4>Remote Users Active Videos ({remoteStreams.length}):</h4>
+
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "10px" }}>
+            {/* Array me loop chalao aur har stream ke liye naya RemoteVideo component banao */}
+            {remoteStreams.map((item) => (
+              <RemoteVideo key={item.id} stream={item.stream} />
+            ))}
+          </div>
         </>
       )}
     </div>
