@@ -26,13 +26,27 @@ const RemoteVideo = ({ stream }) => {
   );
 };
 
-const Room = () => {
+const RemoteAudio = ({ stream }) => {
+  const audioRef = useRef(null);
+
+  useEffect(() => {
+    if (audioRef.current && stream) {
+      audioRef.current.srcObject = stream;
+    }
+  }, [stream]);
+
+  // Hidden audio tag (kuch UI display nahi karega, bas aawaz nikalega)
+  return <audio ref={audioRef} autoPlay />;
+};
+
+const Room = () => {  
   const [device, setDevice] = useState(null);
   const [sendTransport, setSendTransport] = useState(null);
   const [recvTransport, setRecvTransport] = useState(null);
   const socketRef = useRef(null);
   const localVideoRef = useRef(null);
-  const isWebcamStarting = useRef(false); // NAYA INSTANT LOCK// <-- YE NAYI LINE DAAL
+  const [isWebcamActive, setIsWebcamActive] = useState(false); // UI ka lock
+  const isWebcamStarting = useRef(false); // Bouncer ka instant lock
   const [remoteStreams, setRemoteStreams] = useState([]); // [{ consumerId, stream }]
 
   useEffect(() => {
@@ -65,11 +79,11 @@ const Room = () => {
     };
 
     socketRef.current.on("new-producer", handleNewProducer);
-    socketRef.current.on("producer-closed", handleProducerClosed); 
+    socketRef.current.on("producer-closed", handleProducerClosed);
 
     return () => {
       socketRef.current.off("new-producer", handleNewProducer);
-      socketRef.current.off("producer-closed", handleProducerClosed); 
+      socketRef.current.off("producer-closed", handleProducerClosed);
     };
   }, [recvTransport, device]);
 
@@ -346,27 +360,29 @@ const Room = () => {
       console.log("Webcam access maang raha hu...");
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
-        audio: false,
+        audio: true,
       });
 
-      // 1. Stream me se raw video track nikal
       const videoTrack = stream.getVideoTracks()[0];
+      const audioTrack = stream.getAudioTracks()[0];
 
       // 2. THE PROPER REACT FIX: useRef ke through stream attach karna
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
       }
-
-      // 3. Backend me raw track bhejna
-      const producer = await sendTransport.produce({ track: videoTrack });
-      console.log(
-        "BINGOO! Local Producer Created & Video is flowing! ID:",
-        producer.id,
-      );
+      
+      const videoProducer = await sendTransport.produce({ track: videoTrack });
+      console.log("🎥 Video Producer Created! ID:", videoProducer.id);
+      
+      if (audioTrack) {
+        const audioProducer = await sendTransport.produce({ track: audioTrack });
+        console.log("🎤 Audio Producer Created! ID:", audioProducer.id);
+      }
 
       setIsWebcamActive(true);
     } catch (error) {
       console.error("Camera access failed or produce failed:", error);
+      isWebcamStarting.current = false;
     }
   };
 
@@ -513,7 +529,7 @@ const Room = () => {
           if (prev.find((s) => s.id === consumer.id)) return prev;
 
           // Naya object return karo jisme purani streams + nayi stream ho
-          return [...prev, { id: consumer.id, stream }];
+          return [...prev, { id: consumer.id, stream, kind: consumer.kind }];
         });
 
         socketRef.current.emit("consumer-resume", {
@@ -662,12 +678,16 @@ const Room = () => {
       {recvTransport && (
         <>
           <br />
-          <h4>Remote Users Active Videos ({remoteStreams.length}):</h4>
+          <h4>Remote Users Active Videos:</h4>
 
           <div style={{ display: "flex", flexWrap: "wrap", gap: "10px" }}>
-            {/* Array me loop chalao aur har stream ke liye naya RemoteVideo component banao */}
             {remoteStreams.map((item) => (
-              <RemoteVideo key={item.id} stream={item.stream} />
+              // Agar video hai toh dabba dikhao, agar audio hai toh chupa hua audio tag chalao
+              item.kind === "video" ? (
+                <RemoteVideo key={item.id} stream={item.stream} />
+              ) : (
+                <RemoteAudio key={item.id} stream={item.stream} />
+              )
             ))}
           </div>
         </>
